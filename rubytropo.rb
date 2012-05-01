@@ -47,7 +47,8 @@ post '/call1.json' do
   hash = json_params["hash"]  
 
   
-  phone = "+14108025604" 
+  #phone = "+14108025604" 
+  phone = "+14435270060"
   msg = "Hello"
 
     t.call(:to => phone, :from => "4433058652")
