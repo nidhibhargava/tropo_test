@@ -1,0 +1,224 @@
+$ bundle install
+
+#start resque and scheduler process 
+$ heroku ps:scale resque=1
+$ heroku ps:scale scheduler=1
+
+#to view the resque display on heroku go to http://phones.herokuapp.com/resque/overview
+# to view resque on localhost go to localhost:9292/resque/overview
+
+#to stop the resque and scheduler process on heroku 
+$ heroku ps:scale resque=0
+$ heroku ps:scale scheduler=0
+
+#samples for testing with Hurl or Curl
+
+# for local testing
+# curl -X POST -d "{\"territory_name\":\"Hungry Buffs\",\"restaurant_phone_number\":\"1112223333\",\"order_number\":\"1232131\"}" http://localhost:8080/getsession.json
+# curl -X POST -d "{\"territory_name\":\"HungryBuffs\",\"restaurant_phone_number\":\"4435270060\",\"order_number\":\"1232131\"}" http://phones.herokuapp.com/getsession.json
+
+# or hurl post against:
+# http://phones.herokuapp.com/getsession.json
+# {"territory_name":"EatBeemore","restaurant_phone_number":"4435270060","order_number":"3582147"}
+# {"territory_name":"EatBmore","restaurant_phone_number":"4435270060","order_number":"3582147", "order_type":"fax", "oder_total":"10"}
+
+
+
+#Testing tropo#
+
+def get_redis()
+  if ENV.has_key?("REDISTOGO_URL")
+    uri = URI.parse(ENV["REDISTOGO_URL"])
+    Redis.new(:host => uri.host, :port => uri.port, :password => uri.password)
+  else
+    Redis.new(:host => 'localhost', :port => 6379)
+  end
+end
+
+module Phonecall
+   puts "entered phonecall"
+  
+   @queue = :Phone
+   def self.perform(order_number)
+    r = get_redis()
+    
+     # Pulling the items out of the hash into a variable for readability 
+    redis_territory_name = r.hget("id:#{order_number}", "territory_name")
+    redis_restaurant_phone_number = r.hget("id:#{order_number}", "restaurant_phonenumber")
+    redis_order_number = r.hget("id:#{order_number}", "order_number")
+
+    token = "0ae54b34467d494485e7b0294802ec569d274a5bf89e437284c6654d1f7fb021021cfae8229c48e03661d1c9"
+    tropo_session_api = "api.tropo.com"
+    tropo_path = "/1.0/sessions?action=create&token=#{token}&phone=#{redis_restaurant_phone_number}&territory=#{redis_territory_name}&hash=#{redis_order_number}"
+
+    http = Net::HTTP.new tropo_session_api
+    http.get tropo_path
+   end
+end
+
+
+post '/getsession.json' do
+ 
+  req_body = request.body.read
+  json_params = JSON.parse(req_body)
+
+  r = get_redis()
+
+  json_territory_name = json_params['territory_name']
+  json_phone_number = json_params['restaurant_phone_number']
+  json_order_number = json_params['order_number']
+  #json_order_type = json_params['order_type']
+  #json_order_total = json_params['order_total']
+
+  call_attempts = 0
+  
+  #r.hmset("id:#{json_order_number}", "territory_name" => json_territory_name, "restaurant_phonenumber" => json_phone_number, "order_number" => json_order_number)
+  
+  r.hset("id:#{json_order_number}", "territory_name", json_params['territory_name'])
+  r.hset("id:#{json_order_number}", "restaurant_phonenumber", json_params['restaurant_phone_number'])
+  r.hset("id:#{json_order_number}", "order_number", json_params['order_number'])
+  #r.hset("id:#{json_order_number}", "order_type", json_params['order_type'])
+  #r.hset("id:#{json_order_number}", "order_total", json_params['order_total'])
+  r.hset("id:#{json_order_number}", "status", "none")
+  r.hset("id:#{json_order_number}", "attempts", call_attempts)  
+  
+
+  #Resque.enqueue(Phonecall, json_order_number)
+  Resque.enqueue_in(0.minutes, Phonecall, json_order_number)
+    
+  "Placing a call for: Territory Name: #{json_territory_name} On Restaurant Phone Number: #{json_phone_number} Regarding Order Number: #{json_order_number}"
+
+end  
+
+post '/call.json' do
+  
+  puts "entered call json"
+  
+  t = Tropo::Generator.new
+  
+  req_body = request.body.read
+  json_params = JSON.parse(req_body)["session"]["parameters"]
+
+  hash = json_params["hash"]  
+
+  # Pulling data out of redis based on our hash
+  r = get_redis() 
+  redis_territory_name = r.hget("id:#{hash}", "territory_name")
+  redis_restaurant_phone_number = r.hget("id:#{hash}", "restaurant_phonenumber")
+  redis_order_number = r.hget("id:#{hash}", "order_number")
+  
+
+  phone = "+1" + redis_restaurant_phone_number
+  msg = "<speak><prosody rate='-70%'>Hello, you have a new takeout order, Please check your email for order details. The order number is, " + redis_order_number + ", and the order total is 10 dollars." + "If you did not receive an email, please call one eight hundred 689-6613. Thank you</prosody></speak>"
+
+  t.call(:to => phone, :from => "8143257934")
+  t.say(:value => msg, :voice => "Susan")
+
+  #t.ask(:name => 'Digit', :timeout => 30, :say => {:value => "Press one to confirm the order, if you did not receive the order please call the call center.", :voice => "Victor"}, :choices => {:value => "1"})
+   
+  #t.on(:event => 'continue', :next => '/email/' + redis_order_number)
+
+  #error will fire if something went wrong at the server level (i.e., the call never went out at all)
+  t.on(:event => 'error', :next => '/error/' + redis_order_number)
+  
+  #incomplete fires when the call was unsuccessful - such as a timeout or call failure (someone rejecting the call will usually trigger this event)  
+  t.on(:event => 'incomplete', :next => '/incomplete/' + redis_order_number)
+
+  #hangup fires if the call was answered and then disconnected (reaching voicemail will usually trigger hangup)
+  t.on(:event => 'hangup', :next => '/hangup/' + redis_order_number)
+  
+  #update the orderid state after making call   
+  
+  t.response
+end
+
+post '/checkcode/:hash' do
+
+  puts "entered checkcode"
+  t = Tropo::Generator.new
+  req_body=request.body.read
+  tropo_params = JSON.parse(req_body)["result"]["actions"]
+  code = (tropo_params["interpretation"])
+  
+  r = get_redis()
+  redis_territory_name = r.hget("id:#{params[:hash]}", "territory_name")
+  r.hincrby("id:#{params[:hash]}", "attempts", 1)
+  
+  if code == "1"
+    t.say(:value => "Order Confirmed!")
+    t.say(:value => "Thank you for using #{redis_territory_name}")
+    # Log confirmed order here
+  else
+    t.say(:value => "If you did not receive the order please call the call center.")
+    t.say(:value => "Thanks for using  #{redis_territory_name}")
+    # Log error here
+  end
+    r.hset("id:#{params[:hash]}", "status", "Call_success")
+    t.hangup()
+end
+
+#error will fire if something went wrong at the server level (i.e., the call never went out at all)
+post '/error/:hash' do
+  t = Tropo::Generator.new
+  req_body=request.body.read
+  # Log Error Here
+  t.hangup()
+end
+
+ #incomplete fires when the call was unsuccessful - such as a timeout or call failure (someone rejecting the call will usually trigger this event)  
+post '/incomplete/:hash' do
+  t = Tropo::Generator.new
+  
+  # Scheduling the job again in queue 
+
+  #req_body=request.body.read
+  #tropo_params = JSON.parse(req_body)["result"]["actions"]
+  r = get_redis()  
+
+  redis_order_number = r.hget("id:#{params[:hash]}", "order_number")
+  redis_attempts = r.hget("id:#{params[:hash]}", "attempts")
+
+  if Integer(redis_attempts) > 3
+    redirect_to '/email/#{redis_order_number}'
+  else
+    Resque.enqueue_in(3.minutes, Phonecall, redis_order_number)
+  end 
+  t.hangup()
+end
+
+#hangup fires if the call was answered and then disconnected (reaching voicemail will usually trigger hangup)
+post '/hangup/:hash' do
+  t = Tropo::Generator.new
+  # Log Error Here
+  t.hangup()
+end
+
+post '/email/:hash' do
+   puts "entered email"
+  #get redis connections  
+  r = get_redis()  
+
+  redis_order_number = r.hget("id:#{params[:hash]}", "order_number")
+
+  #email to single user:
+  RestClient.post "https://api:key-3xrun8ueczhw1r4sk697ssggjgimrwo6"\
+  "@api.mailgun.net/v2/app2325333.mailgun.org/messages",
+  :from => "Excited User <nbhargava@localupsolutions.com>",
+  :to => "nbhargava@localupsolutions.com",
+  :subject => "Hello",
+  :text => "Testing some Mailgun awesomeness!",
+  "o:deliverytime" => "Fri, 25 Oct 2011 23:10:10 -0000"
+
+  # email jen here about the failure of the call after multiple attempts 
+  puts "Messages sent"
+end
+
+get '/sinatraviews' do
+
+  dir = File.dirname(File.expand_path(__FILE__))
+  r = get_redis()
+  
+  set :views, "#{dir}/views"
+  erb :index, :redis => r  
+
+end
