@@ -57,7 +57,7 @@ post '/call1.json' do
 
   t.on(:event => 'error', :next => '/test/error')
   
-  t.on(:event => 'continue', :next => '/test/email')
+  t.on(:event => 'continue', :next => '/test/continue')
   
   puts "after events"
   
