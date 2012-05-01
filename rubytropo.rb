@@ -50,8 +50,14 @@ post '/call1.json' do
   phone = "+14435270060" 
   msg = "Hello"
 
-  t.call(:to => phone, :from => "8143257934")
-  t.say(:value => msg, :voice => "Susan")
+    t.call(:to => phone, :from => "4433058652")
+#    t.say(:value => "http://testtropo.herokuapp.com/music/jingle.mp3")
+    t.ask(:name => 'digit', 
+        :say => [
+          {:value =>"http://testtropo.herokuapp.com/music/jingle.mp3"
+          },
+          {:value => "Press any number to confirm receipt of order number for details. If you did not receive an order, please call one eight hundred 689-6613. Goodbye ", :voice => "elizabeth"}],
+        :choices => {:value => "[1 DIGIT]", :mode => "dtmf"})
   
   puts "before events"
 
