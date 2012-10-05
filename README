@@ -1,3 +1,5 @@
+#just testing
+
 $ bundle install
 
 #start resque and scheduler process 
